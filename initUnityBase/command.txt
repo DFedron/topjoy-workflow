@@ -1,0 +1,1 @@
+pwsh -NoProfile -ExecutionPolicy Bypass -Command "Import-Module ps2exe; Invoke-PS2EXE .\ProjectTool.ps1 .\ProjectTool.exe -NoConsole -x64 -IconFile .\app.ico -Verbose"
