@@ -353,6 +353,7 @@ class App(RootBase):
 
         # ---- 输出 ----
         self.output_dir = tk.StringVar(value="")
+        self.prefix = tk.StringVar(value="")
         self.suffix = tk.StringVar(value="")
         self.overwrite = tk.BooleanVar(value=False)
 
@@ -413,6 +414,8 @@ class App(RootBase):
         self.out_entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
         self.out_btn = tk.Button(row1, text="选择...", command=self.pick_output_dir)
         self.out_btn.pack(side="left")
+        tk.Label(row1, text="前缀:").pack(side="left", padx=(10, 0))
+        tk.Entry(row1, textvariable=self.prefix, width=10).pack(side="left")
         tk.Label(row1, text="后缀:").pack(side="left", padx=(10, 0))
         tk.Entry(row1, textvariable=self.suffix, width=10).pack(side="left")
 
@@ -530,6 +533,7 @@ class App(RootBase):
         if not cfg:
             return
         self.output_dir.set(cfg.get("output_dir", self.output_dir.get()))
+        self.prefix.set(cfg.get("prefix", self.prefix.get()))
         self.suffix.set(cfg.get("suffix", self.suffix.get()))
         self.overwrite.set(bool(cfg.get("overwrite", self.overwrite.get())))
         self.bg.set(cfg.get("bg", self.bg.get()))
@@ -547,6 +551,7 @@ class App(RootBase):
     def _save_settings(self):
         data = {
             "output_dir": self.output_dir.get(),
+            "prefix": self.prefix.get(),
             "suffix": self.suffix.get(),
             "overwrite": bool(self.overwrite.get()),
             "bg": self.bg.get(),
@@ -780,16 +785,21 @@ class App(RootBase):
     # ---------------- output path ----------------
 
     def _resolve_output_path(self, src_path: str) -> str:
+        prefix = (self.prefix.get().strip() or "")
+        suffix = (self.suffix.get().strip() or "")
+
         if self.overwrite.get():
-            return src_path
+            src_dir = os.path.dirname(src_path)
+            base, ext = os.path.splitext(os.path.basename(src_path))
+            ext = ext or ".png"
+            return os.path.join(src_dir, f"{prefix}{base}{suffix}{ext}")
 
         out_dir = self.output_dir.get().strip()
         if not out_dir:
             raise ValueError("未勾选覆盖时，必须选择输出文件夹。")
 
-        suffix = (self.suffix.get().strip() or "")
         base = os.path.splitext(os.path.basename(src_path))[0]
-        return os.path.join(out_dir, f"{base}{suffix}.png")
+        return os.path.join(out_dir, f"{prefix}{base}{suffix}.png")
 
     # ---------------- run ----------------
 
