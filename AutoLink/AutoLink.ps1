@@ -80,6 +80,30 @@ function Run-ProjectTask([string]$ProjectName, [string]$TargetPath, [string]$Cod
         [System.Windows.Forms.MessageBox]::Show("Target path not found: $root", "Error")
         return
     }
+
+    $projectRoot = Join-Path (Split-Path -Parent $root) $ProjectName
+    if (-not (Test-Path $projectRoot)) {
+        Append-Log "Creating project root: $projectRoot"
+        New-Item -ItemType Directory -Path $projectRoot -Force | Out-Null
+    }
+
+    if (-not (Test-Path $CodePath)) {
+        Append-Log "Cloning code repo to: $CodePath"
+        & git clone "git@git.youle.game:minigame/$ProjectName.git" $CodePath 2>&1 | ForEach-Object {
+            Append-Log $_
+        }
+    }
+
+    if (-not (Test-Path $GameArtPath)) {
+        $svnExe = Ensure-TortoiseSvn
+        if (-not $svnExe) {
+            return
+        }
+        Append-Log "Checking out GameArt to: $GameArtPath"
+        & $svnExe checkout "svn://svn.youle.game/minigame/$ProjectName/GameArt" $GameArtPath 2>&1 | ForEach-Object {
+            Append-Log $_
+        }
+    }
     
     $scriptRoot = Join-Path $root "Assets\_Script"
     $scriptLinkPath = Join-Path $scriptRoot "GamePlay"
@@ -249,11 +273,7 @@ $updateGameArtDefault = {
     if ($gameArtAuto) {
         $settingGameArtPath = $true
         $gameArtDefault = [IO.Path]::Combine($currentPath, $nameBox.Text.Trim(), "GameArt")
-        if (Test-Path $gameArtDefault) {
-            $gameArtPathBox.Text = $gameArtDefault
-        } else {
-            $gameArtPathBox.Text = $currentPath
-        }
+        $gameArtPathBox.Text = $gameArtDefault
         $settingGameArtPath = $false
     }
 }
@@ -270,11 +290,7 @@ $updateBaseDefault = {
     if ($baseAuto) {
         $settingBasePath = $true
         $baseDefault = [IO.Path]::Combine($currentPath, "unitybase")
-        if (Test-Path $baseDefault) {
-            $pathBox.Text = $baseDefault
-        } else {
-            $pathBox.Text = $currentPath
-        }
+        $pathBox.Text = $baseDefault
         $settingBasePath = $false
     }
 }
