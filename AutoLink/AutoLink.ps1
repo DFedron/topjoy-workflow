@@ -156,15 +156,38 @@ function Run-ProjectTask([string]$ProjectName, [string]$TargetPath, [string]$Cod
         Append-Log "Skip svn update: not an SVN working copy: $GameArtPath"
     }
     Set-Location $root
-    git stash
-    git fetch
-    & git checkout $ProjectName 2>&1 | ForEach-Object {
-        Append-Log $_
+    $rootGitDir = Join-Path $root ".git"
+    $hasChanges = $false
+    if (Test-Path $rootGitDir) {
+        $gitStatus = & git status --porcelain 2>&1
+        if ($LASTEXITCODE -eq 0 -and $gitStatus) {
+            $hasChanges = $true
+            $stashName = "autolink-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+            Append-Log "Stashing local changes: $stashName"
+            & git stash push -u -m $stashName 2>&1 | ForEach-Object {
+                Append-Log $_
+            }
+        } else {
+            Append-Log "No local changes, skip git stash."
+        }
+        & git fetch 2>&1 | ForEach-Object {
+            Append-Log $_
+        }
+        & git checkout $ProjectName 2>&1 | ForEach-Object {
+            Append-Log $_
+        }
+        & git pull 2>&1 | ForEach-Object {
+            Append-Log $_
+        }
+        if ($hasChanges) {
+            Append-Log "Restoring stashed changes: $stashName"
+            & git stash pop 2>&1 | ForEach-Object {
+                Append-Log $_
+            }
+        }
+    } else {
+        Append-Log "Skip git ops: not a git repo: $root"
     }
-    & git pull 2>&1 | ForEach-Object {
-        Append-Log $_
-    }
-    git stash pop
     Append-Log "Done. code: $scriptLinkPath"
     Append-Log "Done. art: $GameArtPath"
     [System.Windows.Forms.MessageBox]::Show("OK!")
