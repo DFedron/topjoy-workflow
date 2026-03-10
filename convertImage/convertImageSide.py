@@ -1006,7 +1006,7 @@ class App(RootBase):
 
 def main():
     root = App()
-    expire_utc = datetime.datetime(2026, 3, 10, 0, 0, 0, tzinfo=datetime.timezone.utc)
+    expire_utc = datetime.datetime(2026, 4, 30, 0, 0, 0, tzinfo=datetime.timezone.utc)
     try:
         check_expired_or_exit(root, expire_utc, app_name="atlas_packer", offline_mode="strict")
         set_window_icon_png(root, "app.png")

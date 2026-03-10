@@ -2,7 +2,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
 # ====== 更新逻辑：根据项目名更新仓库 ======
-function Run-ProjectTask([string]$ProjectName, [string]$TargetPath, [System.Windows.Forms.TextBox]$LogBox) {
+function Run-ProjectTask([string]$ProjectName, [string]$TargetPath, [System.Windows.Forms.TextBox]$LogBox, [string]$SvnAccept) {
     function Append-Log([string]$Message) {
         if ($null -ne $LogBox) {
             $LogBox.AppendText($Message + [Environment]::NewLine)
@@ -162,10 +162,14 @@ function Run-ProjectTask([string]$ProjectName, [string]$TargetPath, [System.Wind
         Pop-Location
     }
 
+    if ([string]::IsNullOrWhiteSpace($SvnAccept)) {
+        $SvnAccept = "postpone"
+    }
+
     try {
-        Append-Log "Updating GameArt (svn update): $gameArtPath"
+        Append-Log "Updating GameArt (svn update --non-interactive --accept $SvnAccept): $gameArtPath"
         Push-Location $gameArtPath
-        & $svnExe update 2>&1 | ForEach-Object { Append-Log $_ }
+        & $svnExe update --non-interactive --accept $SvnAccept 2>&1 | ForEach-Object { Append-Log $_ }
         if ($LASTEXITCODE -ne 0) {
             Append-Log "GameArt svn update failed."
             [System.Windows.Forms.MessageBox]::Show("GameArt svn update failed:`n$gameArtPath", "Error")
@@ -199,6 +203,20 @@ $pathBox.Size = New-Object System.Drawing.Size(320, 24)
 $pathBox.Location = New-Object System.Drawing.Point(120, 58)
 $pathBox.Text = (Get-Location).Path
 
+$svnPolicyLabel = New-Object System.Windows.Forms.Label
+$svnPolicyLabel.Text = "SVN 冲突处理:"
+$svnPolicyLabel.AutoSize = $true
+$svnPolicyLabel.Location = New-Object System.Drawing.Point(20, 95)
+
+$svnPolicyBox = New-Object System.Windows.Forms.ComboBox
+$svnPolicyBox.Size = New-Object System.Drawing.Size(320, 24)
+$svnPolicyBox.Location = New-Object System.Drawing.Point(120, 92)
+$svnPolicyBox.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
+[void]$svnPolicyBox.Items.Add("postpone（默认，保留冲突，后续手动处理）")
+[void]$svnPolicyBox.Items.Add("theirs-full（使用服务器版本覆盖本地）")
+[void]$svnPolicyBox.Items.Add("mine-full（保留本地版本）")
+$svnPolicyBox.SelectedIndex = 0
+
 $browseButton = New-Object System.Windows.Forms.Button
 $browseButton.Text = "Browse"
 $browseButton.Size = New-Object System.Drawing.Size(80, 28)
@@ -220,8 +238,8 @@ $logBox = New-Object System.Windows.Forms.TextBox
 $logBox.Multiline = $true
 $logBox.ReadOnly = $true
 $logBox.ScrollBars = [System.Windows.Forms.ScrollBars]::Vertical
-$logBox.Size = New-Object System.Drawing.Size(510, 120)
-$logBox.Location = New-Object System.Drawing.Point(20, 150)
+$logBox.Size = New-Object System.Drawing.Size(510, 95)
+$logBox.Location = New-Object System.Drawing.Point(20, 175)
 
 $browseButton.Add_Click({
     $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
@@ -235,12 +253,12 @@ $browseButton.Add_Click({
 $okButton = New-Object System.Windows.Forms.Button
 $okButton.Text = "OK"
 $okButton.Size = New-Object System.Drawing.Size(80, 28)
-$okButton.Location = New-Object System.Drawing.Point(120, 100)
+$okButton.Location = New-Object System.Drawing.Point(120, 135)
 
 $cancelButton = New-Object System.Windows.Forms.Button
 $cancelButton.Text = "Cancel"
 $cancelButton.Size = New-Object System.Drawing.Size(80, 28)
-$cancelButton.Location = New-Object System.Drawing.Point(210, 100)
+$cancelButton.Location = New-Object System.Drawing.Point(210, 135)
 
 # 点击 OK / 回车触发
 $okButton.Add_Click({
@@ -249,8 +267,10 @@ $okButton.Add_Click({
         [System.Windows.Forms.MessageBox]::Show("Please input project name.", "Warning")
         return
     }
+    $policyText = [string]$svnPolicyBox.SelectedItem
+    $svnAccept = if ($policyText -match "^(postpone|theirs-full|mine-full)") { $matches[1] } else { "postpone" }
     $logBox.Clear()
-    Run-ProjectTask $name $pathBox.Text.Trim() $logBox
+    Run-ProjectTask $name $pathBox.Text.Trim() $logBox $svnAccept
 })
 
 # 取消/ESC 关闭
@@ -263,6 +283,8 @@ $form.Controls.AddRange(@(
     $nameBox,
     $pathLabel,
     $pathBox,
+    $svnPolicyLabel,
+    $svnPolicyBox,
     $browseButton,
     $okButton,
     $cancelButton,

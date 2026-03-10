@@ -1,0 +1,1 @@
+ python -m PyInstaller -F -w convertImageSide.py --icon app.ico --add-data "app.png;."
