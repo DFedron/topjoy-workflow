@@ -1,6 +1,65 @@
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
+$scriptBaseDir = if ([string]::IsNullOrWhiteSpace($PSScriptRoot)) {
+    [System.AppDomain]::CurrentDomain.BaseDirectory.TrimEnd('\')
+} else {
+    $PSScriptRoot
+}
+
+$defaultProjectNames = @("cat", "dragonwar", "mapwar", "cookingsheep", "tread")
+$projectHistoryPath = Join-Path $scriptBaseDir "AutoLink.project-history.txt"
+
+function Get-UniqueStrings([string[]]$Values) {
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    $result = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($value in $Values) {
+        if ([string]::IsNullOrWhiteSpace($value)) {
+            continue
+        }
+        $trimmed = $value.Trim()
+        if ($seen.Add($trimmed)) {
+            [void]$result.Add($trimmed)
+        }
+    }
+    return $result.ToArray()
+}
+
+function Read-ProjectNameHistory {
+    if (-not (Test-Path $projectHistoryPath)) {
+        return @()
+    }
+
+    $lines = Get-Content -Path $projectHistoryPath -ErrorAction SilentlyContinue
+    if ($null -eq $lines) {
+        return @()
+    }
+
+    return Get-UniqueStrings $lines
+}
+
+function Get-ProjectNameOptions {
+    $history = Read-ProjectNameHistory
+    return Get-UniqueStrings ($history + $defaultProjectNames)
+}
+
+function Save-ProjectNameHistory([string]$ProjectName) {
+    if ([string]::IsNullOrWhiteSpace($ProjectName)) {
+        return
+    }
+    $existing = Read-ProjectNameHistory
+    $merged = Get-UniqueStrings ((, $ProjectName) + $existing)
+    [System.IO.File]::WriteAllLines($projectHistoryPath, $merged)
+}
+
+function Refresh-ProjectNameComboBox([System.Windows.Forms.ComboBox]$ComboBox, [string]$CurrentText) {
+    $ComboBox.BeginUpdate()
+    $ComboBox.Items.Clear()
+    [void]$ComboBox.Items.AddRange((Get-ProjectNameOptions))
+    $ComboBox.Text = $CurrentText
+    $ComboBox.EndUpdate()
+}
+
 # ====== 你自己的逻辑：根据项目名做事情 ======
 function Run-ProjectTask([string]$ProjectName, [string]$TargetPath, [string]$CodePath, [string]$GameArtPath, [System.Windows.Forms.TextBox]$LogBox) {
     function Append-Log([string]$Message) {
@@ -8,6 +67,18 @@ function Run-ProjectTask([string]$ProjectName, [string]$TargetPath, [string]$Cod
             $LogBox.AppendText($Message + [Environment]::NewLine)
             [System.Windows.Forms.Application]::DoEvents()
         }
+    }
+
+    function Invoke-LoggedCommand([scriptblock]$Command, [string]$ErrorMessage) {
+        & $Command 2>&1 | ForEach-Object {
+            Append-Log $_
+        }
+        if ($LASTEXITCODE -ne 0) {
+            Append-Log $ErrorMessage
+            [System.Windows.Forms.MessageBox]::Show($ErrorMessage, "Error")
+            return $false
+        }
+        return $true
     }
 
     function Get-TortoiseSvnInstallDir {
@@ -29,7 +100,7 @@ function Run-ProjectTask([string]$ProjectName, [string]$TargetPath, [string]$Cod
     function Ensure-TortoiseSvn {
         $installDir = Get-TortoiseSvnInstallDir
         if (-not $installDir) {
-            $installerPath = Join-Path $PSScriptRoot "TortoiseSVN-setup.exe"
+            $installerPath = Join-Path $scriptBaseDir "TortoiseSVN-setup.exe"
             if (-not (Test-Path $installerPath)) {
                 Append-Log "TortoiseSVN not found. Please place installer at: $installerPath"
                 [System.Windows.Forms.MessageBox]::Show("TortoiseSVN not found. Please place installer at:`n$installerPath", "Error")
@@ -72,125 +143,155 @@ function Run-ProjectTask([string]$ProjectName, [string]$TargetPath, [string]$Cod
     $root = if ([string]::IsNullOrWhiteSpace($TargetPath)) {
         (Get-Location).Path
     } else {
-        $TargetPath
+        $TargetPath.Trim()
     }
+    $CodePath = if ([string]::IsNullOrWhiteSpace($CodePath)) { "" } else { $CodePath.Trim() }
+    $GameArtPath = if ([string]::IsNullOrWhiteSpace($GameArtPath)) { "" } else { $GameArtPath.Trim() }
+    $originalLocation = Get-Location
 
-    if (-not (Test-Path $root)) {
-        Append-Log "Target path not found: $root"
-        [System.Windows.Forms.MessageBox]::Show("Target path not found: $root", "Error")
-        return
-    }
+    try {
+        if (-not (Test-Path $root)) {
+            Append-Log "Target path not found: $root"
+            [System.Windows.Forms.MessageBox]::Show("Target path not found: $root", "Error")
+            return $false
+        }
 
-    $projectRoot = Join-Path (Split-Path -Parent $root) $ProjectName
-    if (-not (Test-Path $projectRoot)) {
-        Append-Log "Creating project root: $projectRoot"
-        New-Item -ItemType Directory -Path $projectRoot -Force | Out-Null
-    }
+        if ([string]::IsNullOrWhiteSpace($CodePath)) {
+            Append-Log "Code path is empty."
+            [System.Windows.Forms.MessageBox]::Show("Code Path cannot be empty.", "Error")
+            return $false
+        }
 
-    if (-not (Test-Path $CodePath)) {
-        Append-Log "Cloning code repo to: $CodePath"
-        & git clone "git@git.youle.game:minigame/$ProjectName.git" $CodePath 2>&1 | ForEach-Object {
-            Append-Log $_
+        if ([string]::IsNullOrWhiteSpace($GameArtPath)) {
+            Append-Log "GameArt path is empty."
+            [System.Windows.Forms.MessageBox]::Show("GameArt Path cannot be empty.", "Error")
+            return $false
         }
-    }
 
-    if (-not (Test-Path $GameArtPath)) {
-        $svnExe = Ensure-TortoiseSvn
-        if (-not $svnExe) {
-            return
+        $projectRoot = Join-Path (Split-Path -Parent $root) $ProjectName
+        if (-not (Test-Path $projectRoot)) {
+            Append-Log "Creating project root: $projectRoot"
+            New-Item -ItemType Directory -Path $projectRoot -Force | Out-Null
         }
-        Append-Log "Checking out GameArt to: $GameArtPath"
-        & $svnExe checkout "svn://svn.youle.game/minigame/$ProjectName/GameArt" $GameArtPath 2>&1 | ForEach-Object {
-            Append-Log $_
-        }
-    }
-    
-    $scriptRoot = Join-Path $root "Assets\_Script"
-    $scriptLinkPath = Join-Path $scriptRoot "GamePlay"
-    $existingLink = Get-Item -LiteralPath $scriptLinkPath -ErrorAction SilentlyContinue
-    if ($null -ne $existingLink) {
-        if ($existingLink.Attributes -band [IO.FileAttributes]::ReparsePoint) {
-            Append-Log "Removing existing link: $scriptLinkPath"
-            Remove-Item -LiteralPath $scriptLinkPath -Recurse -Force
-        } else {
-            Append-Log "Real directory exists, not removing: $scriptLinkPath"
-            [System.Windows.Forms.MessageBox]::Show("Real directory exists at _Script\\GamePlay. Please remove it manually if you want to link.", "Error")
-            return
-        }
-    }
-    Append-Log "Creating junction: $scriptLinkPath -> $CodePath"
-    New-Item -ItemType Junction -Path $scriptLinkPath -Target $CodePath | Out-Null
 
-    $artLinkPath = Join-Path $root "Assets\GameArt"
-    $existingArtLink = Get-Item -LiteralPath $artLinkPath -ErrorAction SilentlyContinue
-    if ($null -ne $existingArtLink) {
-        if ($existingArtLink.Attributes -band [IO.FileAttributes]::ReparsePoint) {
-            Append-Log "Removing existing art link: $artLinkPath"
-            Remove-Item -LiteralPath $artLinkPath -Recurse -Force
-        } else {
-            Append-Log "Real directory exists, not removing: $artLinkPath"
-            [System.Windows.Forms.MessageBox]::Show("Real directory exists at Assets\\GameArt. Please remove it manually if you want to link.", "Error")
-            return
-        }
-    }
-    Append-Log "Creating junction: $artLinkPath -> $GameArtPath"
-    New-Item -ItemType Junction -Path $artLinkPath -Target $GameArtPath | Out-Null
- 
-    $gitDir = Join-Path $CodePath ".git"
-    if (Test-Path $gitDir) {
-        Set-Location $CodePath
-        & git pull 2>&1 | ForEach-Object {
-            Append-Log $_
-        }
-    } else {
-        Append-Log "Skip git pull: not a git repo: $CodePath"
-    }
-    
-    $svnDir = Join-Path $GameArtPath ".svn"
-    if (Test-Path $svnDir) {
-        Set-Location $GameArtPath
-        & svn update 2>&1 | ForEach-Object {
-            Append-Log $_
-        }
-    } else {
-        Append-Log "Skip svn update: not an SVN working copy: $GameArtPath"
-    }
-    Set-Location $root
-    $rootGitDir = Join-Path $root ".git"
-    $hasChanges = $false
-    if (Test-Path $rootGitDir) {
-        $gitStatus = & git status --porcelain 2>&1
-        if ($LASTEXITCODE -eq 0 -and $gitStatus) {
-            $hasChanges = $true
-            $stashName = "autolink-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
-            Append-Log "Stashing local changes: $stashName"
-            & git stash push -u -m $stashName 2>&1 | ForEach-Object {
-                Append-Log $_
-            }
-        } else {
-            Append-Log "No local changes, skip git stash."
-        }
-        & git fetch 2>&1 | ForEach-Object {
-            Append-Log $_
-        }
-        & git checkout $ProjectName 2>&1 | ForEach-Object {
-            Append-Log $_
-        }
-        & git pull 2>&1 | ForEach-Object {
-            Append-Log $_
-        }
-        if ($hasChanges) {
-            Append-Log "Restoring stashed changes: $stashName"
-            & git stash pop 2>&1 | ForEach-Object {
-                Append-Log $_
+        if (-not (Test-Path $CodePath)) {
+            Append-Log "Cloning code repo to: $CodePath"
+            if (-not (Invoke-LoggedCommand { git clone "git@git.youle.game:minigame/$ProjectName.git" $CodePath } "git clone failed: $CodePath")) {
+                return $false
             }
         }
-    } else {
-        Append-Log "Skip git ops: not a git repo: $root"
+
+        if (-not (Test-Path $GameArtPath)) {
+            $svnExe = Ensure-TortoiseSvn
+            if (-not $svnExe) {
+                return $false
+            }
+            Append-Log "Checking out GameArt to: $GameArtPath"
+            if (-not (Invoke-LoggedCommand { & $svnExe checkout "svn://svn.youle.game/minigame/$ProjectName/GameArt" $GameArtPath } "svn checkout failed: $GameArtPath")) {
+                return $false
+            }
+        }
+
+        $scriptRoot = Join-Path $root "Assets\_Script"
+        $scriptLinkPath = Join-Path $scriptRoot "GamePlay"
+        $existingLink = Get-Item -LiteralPath $scriptLinkPath -ErrorAction SilentlyContinue
+        if ($null -ne $existingLink) {
+            if ($existingLink.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                Append-Log "Removing existing link: $scriptLinkPath"
+                Remove-Item -LiteralPath $scriptLinkPath -Recurse -Force
+            } else {
+                Append-Log "Real directory exists, not removing: $scriptLinkPath"
+                [System.Windows.Forms.MessageBox]::Show("Real directory exists at _Script\\GamePlay. Please remove it manually if you want to link.", "Error")
+                return $false
+            }
+        }
+
+        Append-Log "Creating junction: $scriptLinkPath -> $CodePath"
+        New-Item -ItemType Junction -Path $scriptLinkPath -Target $CodePath | Out-Null
+
+        $artLinkPath = Join-Path $root "Assets\GameArt"
+        $existingArtLink = Get-Item -LiteralPath $artLinkPath -ErrorAction SilentlyContinue
+        if ($null -ne $existingArtLink) {
+            if ($existingArtLink.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                Append-Log "Removing existing art link: $artLinkPath"
+                Remove-Item -LiteralPath $artLinkPath -Recurse -Force
+            } else {
+                Append-Log "Real directory exists, not removing: $artLinkPath"
+                [System.Windows.Forms.MessageBox]::Show("Real directory exists at Assets\\GameArt. Please remove it manually if you want to link.", "Error")
+                return $false
+            }
+        }
+
+        Append-Log "Creating junction: $artLinkPath -> $GameArtPath"
+        New-Item -ItemType Junction -Path $artLinkPath -Target $GameArtPath | Out-Null
+
+        $gitDir = Join-Path $CodePath ".git"
+        if (Test-Path $gitDir) {
+            Set-Location $CodePath
+            if (-not (Invoke-LoggedCommand { git pull } "git pull failed: $CodePath")) {
+                return $false
+            }
+        } else {
+            Append-Log "Skip git pull: not a git repo: $CodePath"
+        }
+
+        $svnDir = Join-Path $GameArtPath ".svn"
+        if (Test-Path $svnDir) {
+            Set-Location $GameArtPath
+            if (-not (Invoke-LoggedCommand { svn update } "svn update failed: $GameArtPath")) {
+                return $false
+            }
+        } else {
+            Append-Log "Skip svn update: not an SVN working copy: $GameArtPath"
+        }
+        Set-Location $root
+        $rootGitDir = Join-Path $root ".git"
+        $hasChanges = $false
+        if (Test-Path $rootGitDir) {
+            $gitStatus = & git status --porcelain 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                $errorMessage = "git status failed: $root"
+                Append-Log $errorMessage
+                [System.Windows.Forms.MessageBox]::Show($errorMessage, "Error")
+                return $false
+            }
+            if ($gitStatus) {
+                $hasChanges = $true
+                $stashName = "autolink-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+                Append-Log "Stashing local changes: $stashName"
+                if (-not (Invoke-LoggedCommand { git stash push -u -m $stashName } "git stash failed: $root")) {
+                    return $false
+                }
+            } else {
+                Append-Log "No local changes, skip git stash."
+            }
+
+            if (-not (Invoke-LoggedCommand { git fetch } "git fetch failed: $root")) {
+                return $false
+            }
+            if (-not (Invoke-LoggedCommand { git checkout $ProjectName } "git checkout failed: $ProjectName")) {
+                return $false
+            }
+            if (-not (Invoke-LoggedCommand { git pull } "git pull failed: $root")) {
+                return $false
+            }
+            if ($hasChanges) {
+                Append-Log "Restoring stashed changes: $stashName"
+                if (-not (Invoke-LoggedCommand { git stash pop } "git stash pop failed: $root")) {
+                    return $false
+                }
+            }
+        } else {
+            Append-Log "Skip git ops: not a git repo: $root"
+        }
+
+        Append-Log "Done. code: $scriptLinkPath"
+        Append-Log "Done. art: $GameArtPath"
+        [System.Windows.Forms.MessageBox]::Show("OK!")
+        return $true
+    } finally {
+        Set-Location $originalLocation
     }
-    Append-Log "Done. code: $scriptLinkPath"
-    Append-Log "Done. art: $GameArtPath"
-    [System.Windows.Forms.MessageBox]::Show("OK!")
 }
 
 # ====== UI ======
@@ -228,7 +329,7 @@ $nameBox = New-Object System.Windows.Forms.ComboBox
 $nameBox.Size = New-Object System.Drawing.Size(320, 24)
 $nameBox.Location = New-Object System.Drawing.Point(120, 22)
 $nameBox.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDown
-$nameBox.Items.AddRange(@("cat", "dragonwar", "mapwar", "cookingsheep", "tread"))
+[void]$nameBox.Items.AddRange((Get-ProjectNameOptions))
 $nameBox.Text = ""
 $nameBox.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
 
@@ -389,7 +490,11 @@ $okButton.Add_Click({
         return
     }
     $logBox.Clear()
-    Run-ProjectTask $name $pathBox.Text.Trim() $codePathBox.Text.Trim() $gameArtPathBox.Text.Trim() $logBox
+    $success = Run-ProjectTask $name $pathBox.Text.Trim() $codePathBox.Text.Trim() $gameArtPathBox.Text.Trim() $logBox
+    if ($success) {
+        Save-ProjectNameHistory $name
+        Refresh-ProjectNameComboBox $nameBox $name
+    }
 })
 
 $autoButton.Add_Click({

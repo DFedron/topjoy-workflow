@@ -214,6 +214,61 @@ def parse_bg_color(text: str):
     raise ValueError("背景颜色格式不正确：用 transparent 或 #RRGGBB 或 R,G,B(,A)")
 
 
+def crop_transparent_area(img: Image.Image, padding: int = 0) -> Image.Image:
+    """
+    按 alpha 通道裁切四周完全透明的区域，并可保留透明边距。
+    如果图片没有非透明像素，则保持原图不变，避免得到空尺寸图片。
+    """
+    if img.mode != "RGBA":
+        img = img.convert("RGBA")
+
+    alpha = img.getchannel("A")
+    bbox = alpha.getbbox()
+    if bbox is None:
+        return img
+
+    left, top, right, bottom = bbox
+    pad = max(0, int(padding))
+    left = max(0, left - pad)
+    top = max(0, top - pad)
+    right = min(img.width, right + pad)
+    bottom = min(img.height, bottom + pad)
+    return img.crop((left, top, right, bottom))
+
+
+def get_alpha_bbox(img: Image.Image) -> tuple[int, int, int, int] | None:
+    if img.mode != "RGBA":
+        img = img.convert("RGBA")
+    return img.getchannel("A").getbbox()
+
+
+def expand_bbox(
+    bbox: tuple[int, int, int, int],
+    width: int,
+    height: int,
+    padding: int = 0,
+) -> tuple[int, int, int, int]:
+    left, top, right, bottom = bbox
+    pad = max(0, int(padding))
+    return (
+        max(0, left - pad),
+        max(0, top - pad),
+        min(width, right + pad),
+        min(height, bottom + pad),
+    )
+
+
+def crop_with_bbox(img: Image.Image, bbox: tuple[int, int, int, int] | None) -> Image.Image:
+    if bbox is None:
+        return img
+    left, top, right, bottom = bbox
+    left = max(0, min(img.width, left))
+    top = max(0, min(img.height, top))
+    right = max(left, min(img.width, right))
+    bottom = max(top, min(img.height, bottom))
+    return img.crop((left, top, right, bottom))
+
+
 def align_to_4(n: int, mode: str = "up") -> int:
     """把 n 对齐到 4 的倍数。mode: up / down / nearest"""
     if n <= 0:
@@ -324,6 +379,8 @@ def expand_image_to_canvas(
 class ImageTask:
     src_path: str
     src_size: Tuple[int, int] = (0, 0)
+    alpha_bbox: Optional[Tuple[int, int, int, int]] = None
+    content_size: Tuple[int, int] = (0, 0)
 
     # 预缩放尺寸（对齐4之前）
     base_size: Tuple[int, int] = (0, 0)
@@ -360,6 +417,10 @@ class App(RootBase):
         # ---- 背景 & 放大 ----
         self.bg = tk.StringVar(value="transparent")
         self.allow_upscale = tk.BooleanVar(value=False)
+        self.trim_transparent = tk.BooleanVar(value=True)
+        self.trim_padding = tk.StringVar(value="0")
+        self.trim_mode = tk.StringVar(value="batch")
+        self.direct_output = tk.BooleanVar(value=False)
 
         # ---- 固定宽高（当不用 max_side 时才作为目标）----
         self.out_w = tk.StringVar(value="512")
@@ -384,6 +445,7 @@ class App(RootBase):
         self._log_queue = queue.Queue()
 
         self._preview_tk = None
+        self._batch_trim_bbox: tuple[int, int, int, int] | None = None
 
         self._load_settings()
         self._build_ui()
@@ -442,6 +504,16 @@ class App(RootBase):
 
         tk.Checkbutton(row3, text="允许放大小图", variable=self.allow_upscale,
                        command=self.rebuild_all_tasks).pack(side="left")
+        tk.Checkbutton(row3, text="裁切透明边缘", variable=self.trim_transparent,
+                       command=self.rebuild_all_tasks).pack(side="left", padx=(10, 0))
+        tk.Label(row3, text="模式:").pack(side="left", padx=(8, 0))
+        tk.OptionMenu(row3, self.trim_mode, "batch", "single",
+                      command=lambda _=None: self.rebuild_all_tasks()).pack(side="left")
+        tk.Label(row3, text="保留边距:").pack(side="left", padx=(8, 0))
+        tk.Entry(row3, textvariable=self.trim_padding, width=6).pack(side="left")
+        tk.Label(row3, text="px").pack(side="left", padx=(2, 10))
+        tk.Checkbutton(row3, text="直接输出裁切结果", variable=self.direct_output,
+                       command=self.rebuild_all_tasks).pack(side="left", padx=(0, 10))
 
         # tk.Label(row3, text="背景:").pack(side="left", padx=(14, 0))
         # tk.Entry(row3, textvariable=self.bg, width=18).pack(side="left", padx=(0, 10))
@@ -538,6 +610,10 @@ class App(RootBase):
         self.overwrite.set(bool(cfg.get("overwrite", self.overwrite.get())))
         self.bg.set(cfg.get("bg", self.bg.get()))
         self.allow_upscale.set(bool(cfg.get("allow_upscale", self.allow_upscale.get())))
+        self.trim_transparent.set(bool(cfg.get("trim_transparent", self.trim_transparent.get())))
+        self.trim_padding.set(cfg.get("trim_padding", self.trim_padding.get()))
+        self.trim_mode.set(cfg.get("trim_mode", self.trim_mode.get()))
+        self.direct_output.set(bool(cfg.get("direct_output", self.direct_output.get())))
         self.out_w.set(cfg.get("out_w", self.out_w.get()))
         self.out_h.set(cfg.get("out_h", self.out_h.get()))
         self.use_max_side.set(bool(cfg.get("use_max_side", self.use_max_side.get())))
@@ -556,6 +632,10 @@ class App(RootBase):
             "overwrite": bool(self.overwrite.get()),
             "bg": self.bg.get(),
             "allow_upscale": bool(self.allow_upscale.get()),
+            "trim_transparent": bool(self.trim_transparent.get()),
+            "trim_padding": self.trim_padding.get(),
+            "trim_mode": self.trim_mode.get(),
+            "direct_output": bool(self.direct_output.get()),
             "out_w": self.out_w.get(),
             "out_h": self.out_h.get(),
             "use_max_side": bool(self.use_max_side.get()),
@@ -600,49 +680,94 @@ class App(RootBase):
             title="选择图片（可多选）",
             filetypes=[("Images", "*.png;*.jpg;*.jpeg;*.webp;*.bmp;*.tga")]
         )
-        for p in paths:
-            self.add_task(p)
+        self.add_tasks(paths)
 
     def add_folder(self):
         folder = filedialog.askdirectory(title="选择文件夹（添加里面的图片）")
         if not folder:
             return
-        for p in collect_images_from_folder(folder):
-            self.add_task(p)
+        self.add_tasks(collect_images_from_folder(folder))
 
     def on_drop(self, event):
         files = self.tk.splitlist(event.data)
+        paths = []
         for f in files:
             f = f.strip("{}")
             if is_image_file(f):
-                self.add_task(f)
+                paths.append(f)
+        self.add_tasks(paths)
+
+    def add_tasks(self, paths):
+        added_indices = []
+        skipped = 0
+
+        for raw_path in paths:
+            path = os.path.abspath(raw_path)
+            if path in self.task_index:
+                continue
+            try:
+                with Image.open(path) as img:
+                    rgba = img.convert("RGBA")
+                    w, h = rgba.size
+                    alpha_bbox = get_alpha_bbox(rgba)
+            except Exception as e:
+                skipped += 1
+                self.log(f"[跳过] 读取失败: {path} ({e})")
+                continue
+
+            task = ImageTask(src_path=path, src_size=(w, h), alpha_bbox=alpha_bbox)
+            self.tasks.append(task)
+            idx = len(self.tasks) - 1
+            self.task_index[path] = idx
+            added_indices.append(idx)
+
+        if not added_indices:
+            return
+
+        for idx in added_indices:
+            self.listbox.insert("end", os.path.basename(self.tasks[idx].src_path))
+
+        self._batch_trim_bbox = self._compute_batch_trim_bbox()
+
+        last_idx = added_indices[-1]
+        self.listbox.selection_clear(0, "end")
+        self.listbox.selection_set(last_idx)
+        self.rebuild_selected_preview()
+
+        if len(added_indices) > 1:
+            msg = f"已添加 {len(added_indices)} 张图片。"
+            if skipped:
+                msg += f" 跳过 {skipped} 张。"
+            self.log(msg)
 
     def add_task(self, path: str):
         path = os.path.abspath(path)
         if path in self.task_index:
             return
         try:
-            img = Image.open(path)
-            w, h = img.size
+            with Image.open(path) as img:
+                rgba = img.convert("RGBA")
+                w, h = rgba.size
+                alpha_bbox = get_alpha_bbox(rgba)
         except Exception as e:
             self.log(f"[跳过] 读取失败: {path} ({e})")
             return
 
-        task = ImageTask(src_path=path, src_size=(w, h))
-        self._recompute_task(task)
-
+        task = ImageTask(src_path=path, src_size=(w, h), alpha_bbox=alpha_bbox)
         self.tasks.append(task)
         self.task_index[path] = len(self.tasks) - 1
+        self._batch_trim_bbox = self._compute_batch_trim_bbox()
         self.listbox.insert("end", os.path.basename(path))
 
         # 自动选中并显示
         self.listbox.selection_clear(0, "end")
         self.listbox.selection_set("end")
-        self.listbox.event_generate("<<ListboxSelect>>")
+        self.rebuild_selected_preview()
 
     def clear_tasks(self):
         self.tasks.clear()
         self.task_index.clear()
+        self._batch_trim_bbox = None
         self.listbox.delete(0, "end")
         self.preview_label.config(image="")
         self.info_label.config(text="")
@@ -659,6 +784,7 @@ class App(RootBase):
         self.task_index.clear()
         for i, t in enumerate(self.tasks):
             self.task_index[t.src_path] = i
+        self._batch_trim_bbox = self._compute_batch_trim_bbox()
 
         self.preview_label.config(image="")
         self.info_label.config(text="")
@@ -670,6 +796,7 @@ class App(RootBase):
         kept = [t for t in self.tasks if t.src_path in failed_paths]
         self.tasks = kept
         self.task_index = {t.src_path: i for i, t in enumerate(self.tasks)}
+        self._batch_trim_bbox = self._compute_batch_trim_bbox()
 
         self.listbox.delete(0, "end")
         for t in self.tasks:
@@ -693,6 +820,48 @@ class App(RootBase):
         except Exception:
             return default
 
+    def _get_non_negative_int(self, s: str, default: int) -> int:
+        try:
+            v = int(str(s).strip())
+            return v if v >= 0 else default
+        except Exception:
+            return default
+
+    def _compute_batch_trim_bbox(self) -> tuple[int, int, int, int] | None:
+        if not self.trim_transparent.get() or self.trim_mode.get() != "batch":
+            return None
+        if not self.tasks:
+            return None
+
+        trim_padding = self._get_non_negative_int(self.trim_padding.get(), 0)
+        union_bbox = None
+
+        for task in self.tasks:
+            bbox = task.alpha_bbox
+            if bbox is None:
+                continue
+            bbox = expand_bbox(bbox, task.src_size[0], task.src_size[1], trim_padding)
+            if union_bbox is None:
+                union_bbox = bbox
+            else:
+                union_bbox = (
+                    min(union_bbox[0], bbox[0]),
+                    min(union_bbox[1], bbox[1]),
+                    max(union_bbox[2], bbox[2]),
+                    max(union_bbox[3], bbox[3]),
+                )
+        return union_bbox
+
+    def _load_source_image_for_task(self, task: ImageTask) -> Image.Image:
+        src_img = Image.open(task.src_path).convert("RGBA")
+        if self.trim_transparent.get():
+            trim_padding = self._get_non_negative_int(self.trim_padding.get(), 0)
+            if self.trim_mode.get() == "batch":
+                src_img = crop_with_bbox(src_img, self._batch_trim_bbox)
+            else:
+                src_img = crop_transparent_area(src_img, trim_padding)
+        return src_img
+
     def _recompute_task(self, task: ImageTask):
         ow = self._get_int(self.out_w.get(), 512)
         oh = self._get_int(self.out_h.get(), 512)
@@ -700,40 +869,60 @@ class App(RootBase):
 
         bg = parse_bg_color(self.bg.get())
         allow_up = bool(self.allow_upscale.get())
+        direct_output = bool(self.direct_output.get())
 
-        cw, ch, bw, bh, pre_scale = compute_target_canvas(
-            task.src_size[0], task.src_size[1],
-            use_max_side=self.use_max_side.get(),
-            max_side=ms,
-            allow_upscale=allow_up,
-            use_align4=self.use_align4.get(),
-            align_mode=self.align4_mode.get(),
-            out_w=ow,
-            out_h=oh
-        )
-        task.base_size = (bw, bh)
-        task.pre_scale = pre_scale
-        task.canvas_size = (cw, ch)
-
-        # 为保证“预览与最终一致”：预览也先做 pre-scale resize，再贴入 canvas
         try:
-            src_img = Image.open(task.src_path).convert("RGBA")
+            src_img = self._load_source_image_for_task(task)
+            task.content_size = src_img.size
+
+            if direct_output:
+                if self.use_max_side.get():
+                    bw, bh, pre_scale = downscale_to_max_side(src_img.size[0], src_img.size[1], ms)
+                else:
+                    pre_scale = min(ow / src_img.size[0], oh / src_img.size[1])
+                    if not allow_up:
+                        pre_scale = min(pre_scale, 1.0)
+                    bw = max(1, int(round(src_img.size[0] * pre_scale)))
+                    bh = max(1, int(round(src_img.size[1] * pre_scale)))
+                cw, ch = bw, bh
+            else:
+                cw, ch, bw, bh, pre_scale = compute_target_canvas(
+                    src_img.size[0], src_img.size[1],
+                    use_max_side=self.use_max_side.get(),
+                    max_side=ms,
+                    allow_upscale=allow_up,
+                    use_align4=self.use_align4.get(),
+                    align_mode=self.align4_mode.get(),
+                    out_w=ow,
+                    out_h=oh
+                )
+            task.base_size = (bw, bh)
+            task.pre_scale = pre_scale
+            task.canvas_size = (cw, ch)
 
             # 先预缩放到 base_size（允许放大或缩小）
-            if (bw, bh) != task.src_size:
+            if (bw, bh) != src_img.size:
                 src_img = src_img.resize((bw, bh), Image.LANCZOS)
 
-            expanded, scale_to_canvas, resized_size = expand_image_to_canvas(
-                src_img, cw, ch, allow_up, bg
-            )
-            task.scale_to_canvas = scale_to_canvas
-            task.resized_size = resized_size
+            if direct_output:
+                expanded = src_img
+                task.scale_to_canvas = 1.0
+                task.resized_size = src_img.size
+            else:
+                expanded, scale_to_canvas, resized_size = expand_image_to_canvas(
+                    src_img, cw, ch, allow_up, bg
+                )
+                task.scale_to_canvas = scale_to_canvas
+                task.resized_size = resized_size
 
             preview = expanded.copy()
             preview.thumbnail((PREVIEW_SIZE, PREVIEW_SIZE), Image.LANCZOS)
             task.preview_pil = preview
         except Exception as e:
             task.preview_pil = None
+            task.content_size = task.src_size
+            task.base_size = task.src_size
+            task.canvas_size = task.src_size
             task.scale_to_canvas = 1.0
             task.resized_size = (0, 0)
             self.log(f"[预览失败] {os.path.basename(task.src_path)}: {e}")
@@ -741,6 +930,7 @@ class App(RootBase):
     def rebuild_all_tasks(self):
         if not self.tasks:
             return
+        self._batch_trim_bbox = self._compute_batch_trim_bbox()
         for t in self.tasks:
             self._recompute_task(t)
         self.log("已重算全部任务的尺寸与预览。")
@@ -751,6 +941,7 @@ class App(RootBase):
         if not sel:
             return
         idx = sel[0]
+        self._batch_trim_bbox = self._compute_batch_trim_bbox()
         self._recompute_task(self.tasks[idx])
         self.on_select_task(None)
 
@@ -761,6 +952,9 @@ class App(RootBase):
         idx = sel[0]
         t = self.tasks[idx]
         if t.preview_pil is None:
+            self._batch_trim_bbox = self._compute_batch_trim_bbox()
+            self._recompute_task(t)
+        if t.preview_pil is None:
             self.preview_label.config(image="")
             self.info_label.config(text="预览不可用")
             self._preview_tk = None
@@ -770,6 +964,7 @@ class App(RootBase):
         self.preview_label.config(image=self._preview_tk)
 
         sw, sh = t.src_size
+        tw, th = t.content_size
         cw, ch = t.canvas_size
         total_scale = t.pre_scale * t.scale_to_canvas
 
@@ -777,7 +972,10 @@ class App(RootBase):
             text=(
                 f"文件: {os.path.basename(t.src_path)}\n"
                 f"变化前: {sw} x {sh}\n"
+                f"裁切后: {tw} x {th}\n"
                 f"变化后: {cw} x {ch}\n"
+                f"裁切模式: {'整批统一' if self.trim_mode.get() == 'batch' else '单张独立'}\n"
+                f"输出模式: {'直接输出' if self.direct_output.get() else '补画布'}\n"
                 f"缩放: {total_scale:.4f}"
             )
         )
@@ -837,6 +1035,7 @@ class App(RootBase):
             tinify_key = self.tinify_key.get().strip()
 
             concurrency = self._get_int(self.concurrency.get(), 4)
+            self._batch_trim_bbox = self._compute_batch_trim_bbox()
 
             # 确保参数一致（最终输出与预览同一策略）
             for t in self.tasks:
@@ -984,15 +1183,18 @@ class App(RootBase):
           3) 再贴入对齐后的 canvas_size
           4) 保存 expanded（如启用压缩则它是 tmp_in）
         """
-        src_img = Image.open(task.src_path).convert("RGBA")
+        src_img = self._load_source_image_for_task(task)
 
         bw, bh = task.base_size
-        if (bw, bh) != task.src_size:
+        if (bw, bh) != src_img.size:
             # 与预览一致的 pre-scale
             src_img = src_img.resize((bw, bh), Image.LANCZOS)
 
-        cw, ch = task.canvas_size
-        expanded, _, _ = expand_image_to_canvas(src_img, cw, ch, allow_upscale, bg_rgba)
+        if self.direct_output.get():
+            expanded = src_img
+        else:
+            cw, ch = task.canvas_size
+            expanded, _, _ = expand_image_to_canvas(src_img, cw, ch, allow_upscale, bg_rgba)
 
         os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
         expanded.save(out_path)
