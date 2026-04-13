@@ -884,6 +884,10 @@ class App(RootBase):
                         pre_scale = min(pre_scale, 1.0)
                     bw = max(1, int(round(src_img.size[0] * pre_scale)))
                     bh = max(1, int(round(src_img.size[1] * pre_scale)))
+                if self.use_align4.get():
+                    # 直接输出不会补画布，因此在这里把最终输出尺寸本身对齐到 4 的倍数。
+                    bw = align_to_4(bw, self.align4_mode.get())
+                    bh = align_to_4(bh, self.align4_mode.get())
                 cw, ch = bw, bh
             else:
                 cw, ch, bw, bh, pre_scale = compute_target_canvas(
