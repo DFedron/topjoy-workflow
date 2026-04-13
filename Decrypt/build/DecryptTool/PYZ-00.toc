@@ -1,4 +1,4 @@
-('G:\\YunYunProj\\workflowTool\\Decrypt\\build\\TopjoyDecryptTool\\PYZ-00.pyz',
+('G:\\YunYunProj\\workflowTool\\Decrypt\\build\\DecryptTool\\PYZ-00.pyz',
  [('Crypto',
    'G:\\YunYunProj\\workflowTool\\Decrypt\\.venv\\Lib\\site-packages\\Crypto\\__init__.py',
    'PYMODULE'),
