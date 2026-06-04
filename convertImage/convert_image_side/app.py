@@ -1,5 +1,4 @@
 import asyncio
-import datetime
 import os
 import queue
 import tempfile
@@ -35,7 +34,6 @@ from .image_ops import (
     is_image_file,
     parse_bg_color,
 )
-from .license import check_expired_or_exit
 from .models import ImageTask
 from .resources import set_window_icon_png
 from .settings import load_settings, save_settings
@@ -857,9 +855,7 @@ class App(RootBase):
 
 def main():
     root = App()
-    expire_utc = datetime.datetime(2026, 9, 30, 0, 0, 0, tzinfo=datetime.timezone.utc)
     try:
-        check_expired_or_exit(root, expire_utc, app_name="atlas_packer", offline_mode="strict")
         set_window_icon_png(root, "app.png")
         root.mainloop()
     finally:
